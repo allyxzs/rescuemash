@@ -1,78 +1,39 @@
 defmodule RescueMesh.Mesh.Discovery do
-  @moduledoc """
-  Descobridor de nós na rede local.
-  Utiliza UDP broadcast para encontrar outros nós e mantém lista de vizinhos.
-  """
-
+  @moduledoc "Descoberta e tabela de vizinhos via UDP broadcast."
   use GenServer
 
-  @doc """
-  Inicia o serviço de descoberta.
-  """
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
+  @interval Application.compile_env!(:rescue_mesh, :mesh_broadcast_interval_ms)
+  @port Application.compile_env!(:rescue_mesh, :mesh_udp_port)
 
-  @doc """
-  Força uma varredura imediata de nós.
-  """
-  def scan do
-    GenServer.cast(__MODULE__, :scan)
-  end
+  def start_link(_), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
+  def handle_packet(ip, data), do: GenServer.cast(__MODULE__, {:packet, ip, data})
+  def get_neighbors, do: GenServer.call(__MODULE__, :neighbors)
 
-  @doc """
-  Atualiza informações de um vizinho.
-  """
-  def update_neighbor(from, message) do
-    last_seen = RescueMesh.State.get(:last_seen) || %{}
-    last_seen = Map.put(last_seen, from, System.system_time(:second))
-    RescueMesh.State.put(:last_seen, last_seen)
+  @impl true
+  def init(_) do
+    Process.send_after(self(), :broadcast, 0)
+    {:ok, %{neighbors: %{}}}
   end
 
   @impl true
-  def init(opts) do
-    schedule_broadcast()
-    schedule_scan()
-    {:ok, %{nodes: %{}, broadcast_socket: nil}}
+  def handle_call(:neighbors, _from, state), do: {:reply, Map.values(state.neighbors), state}
+
+  @impl true
+  def handle_cast({:packet, ip, data}, state) do
+    case Jason.decode(data) do
+      {:ok, %{"node_id" => id, "port" => port}} when is_binary(id) and is_integer(port) ->
+        neighbor = %{node_id: id, ip: ip, port: port, last_seen: System.system_time(:second), online: true}
+        {:noreply, %{state | neighbors: Map.put(state.neighbors, id, neighbor)}}
+      _ -> {:noreply, state}
+    end
   end
 
   @impl true
   def handle_info(:broadcast, state) do
-    broadcast_discovery()
-    schedule_broadcast()
+    RescueMesh.Mesh.UDP.send_discovery(Jason.encode!(%{
+      "node_id" => RescueMesh.NodeId.get(), "port" => @port, "ts" => System.system_time(:second)
+    }))
+    Process.send_after(self(), :broadcast, @interval)
     {:noreply, state}
-  end
-
-  @impl true
-  def handle_info(:scan, state) do
-    last_seen = RescueMesh.State.get(:last_seen) || %{}
-    now = System.system_time(:second)
-    ttl = 30_000
-
-    active = Map.filter(last_seen, fn {_, ts} -> now - ts < ttl end)
-
-    RescueMesh.State.put(:neighbors, Map.keys(active))
-    schedule_scan()
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_cast(:scan, state) do
-    handle_info(:scan, state)
-    {:noreply, state}
-  end
-
-  defp broadcast_discovery do
-    # Simula broadcast de descoberta
-    node_id = "node-#{System.system_time(:nanosecond)}"
-    RescueMesh.Mesh.Node.add_neighbor(node_id, %{ip: "127.0.0.1", port: 4001})
-  end
-
-  defp schedule_broadcast do
-    Process.send_after(self(), :broadcast, 5_000)
-  end
-
-  defp schedule_scan do
-    Process.send_after(self(), :scan, 10_000)
   end
 end

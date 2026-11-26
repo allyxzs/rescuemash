@@ -1,0 +1,8 @@
+.git
+_build
+deps
+.elixir_ls
+priv/*.sqlite3
+priv/node_id
+.env
+assets/node_modules

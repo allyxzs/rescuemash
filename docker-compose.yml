@@ -1,0 +1,15 @@
+services:
+  rescuemesh:
+    build: .
+    ports:
+      - "4000:4000"
+      - "43690:43690/udp"
+      - "43691:43691/udp"
+    env_file:
+      - .env
+    volumes:
+      - rescuemesh_data:/app/priv
+    restart: unless-stopped
+
+volumes:
+  rescuemesh_data:

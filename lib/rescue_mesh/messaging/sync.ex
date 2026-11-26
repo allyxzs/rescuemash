@@ -1,0 +1,15 @@
+defmodule RescueMesh.Messaging.Sync do
+  @moduledoc """
+  Sincronização de mensagens após reconexão.
+  """
+  use GenServer
+
+  def start_link(_) do
+    GenServer.start_link(__MODULE__, [], name: __MODULE__)
+  end
+
+  @impl true
+  def init(_) do
+    {:ok, %{}}
+  end
+end

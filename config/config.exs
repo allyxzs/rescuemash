@@ -1,34 +1,32 @@
-config :rescue_mesh, RescueMesh.Mesh.Node,
-  name: :rescue_mesh_node,
-  port: 4369,
-  interface: :inet,
-  message_ttl: 3600,
-  max_message_size: 65536,
-  sync_interval: 30_000,
-  gossip_interval: 5_000
+import Config
 
-config :rescue_mesh, RescueMesh.Mesh.Discovery,
-  enabled: true,
-  broadcast_interval: 5_000,
-  scan_interval: 10_000,
-  ttl: 30_000
-
-config :rescue_mesh, RescueMesh.Messaging.Store,
-  path: "priv/db/rescue_mesh.sqlite3",
-  pool_size: 10
-
-config :rescue_mesh, RescueMesh.Mesh.Gossip,
-  enabled: true,
-  fanout: 3,
-  max_hops: 5,
-  anti_entropy_interval: 60_000
-
-config :rescue_mesh, :ecto_repos, [RescueMesh.Repo]
+config :rescue_mesh,
+  ecto_repos: [RescueMesh.Repo],
+  node_id_path: "priv/node_id",
+  mesh_udp_port: 43_690,
+  mesh_discovery_port: 43_691,
+  mesh_broadcast_interval_ms: 5_000,
+  mesh_heartbeat_interval_ms: 5_000,
+  mesh_neighbor_timeout_ms: 20_000,
+  mesh_message_ttl: 8,
+  mesh_max_packet_bytes: 65_536,
+  mesh_max_retries: 3,
+  api_max_body_bytes: 65_536,
+  api_rate_limit_per_minute: 120
 
 config :rescue_mesh, RescueMesh.Repo,
-  database: System.get_env("DATABASE_URL") || "ecto_sqlite3:/priv/db/rescue_mesh.sqlite3",
-  pool: Ecto.Adapters.SQL.Sandbox
+  database: Path.expand("priv/rescue_mesh.sqlite3"),
+  pool_size: 5,
+  busy_timeout: 5_000
 
-config :logger, level: :info
+config :rescue_mesh, RescueMeshWeb.Endpoint,
+  url: [host: "localhost"],
+  adapter: Bandit.PhoenixAdapter,
+  render_errors: [formats: [json: RescueMeshWeb.ErrorJSON], layout: false],
+  pubsub_server: RescueMesh.PubSub,
+  live_view: [signing_salt: "change-me-in-runtime"]
 
-import_config "#{Mix.env()}.exs"
+config :phoenix, :json_library, Jason
+config :logger, :console, format: "[$level] $message\n"
+
+import_config "#{config_env()}.exs"

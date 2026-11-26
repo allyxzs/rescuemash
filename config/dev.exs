@@ -1,15 +1,12 @@
 import Config
 
-config :rescue_mesh, RescueMesh.Repo,
-  username: nil,
-  password: nil,
-  database: "ecto_sqlite3:/priv/db/rescue_mesh.sqlite3",
-  show_sql: false,
-  pool_size: 10
+config :rescue_mesh, RescueMesh.Repo, database: Path.expand("priv/rescue_mesh_dev.sqlite3")
 
-config :rescue_mesh, RescueMesh.Endpoint,
-  http: [port: 4000],
+config :rescue_mesh, RescueMeshWeb.Endpoint,
+  http: [ip: {0, 0, 0, 0}, port: 4000],
+  server: true,
   debug_errors: true,
   code_reloader: true,
-  check_origin: false,
-  watchers: []
+  check_origin: false
+
+config :logger, level: :debug

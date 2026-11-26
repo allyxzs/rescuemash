@@ -1,69 +1,82 @@
 defmodule RescueMesh.Mesh.Gossip do
-  @moduledoc """
-  Protocolo gossip para disseminar mensagens através da rede mesh.
-  Propaga mensagens de nó em nó com TTL e priorização.
-  """
+  @moduledoc "Gossip com TTL, deduplicação e ACKs autenticados pelo envelope do nó."
+  use GenServer
 
-  @doc """
-  Broadcast uma mensagem para todos os vizinhos.
-  """
-  def broadcast(message) do
-    neighbors = RescueMesh.Mesh.Node.get_neighbors()
-    for node <- neighbors do
-      send_message_to(node, message)
+  @max_ttl Application.compile_env!(:rescue_mesh, :mesh_message_ttl)
+
+  def start_link(_) do
+    GenServer.start_link(__MODULE__, [], name: __MODULE__)
+  end
+
+  def handle_packet(ip, data), do: GenServer.cast(__MODULE__, {:packet, ip, data})
+  def broadcast(attrs), do: GenServer.cast(__MODULE__, {:broadcast, attrs})
+
+  @impl true
+  def init(_) do
+    {:ok, %{seen: MapSet.new()}}
+  end
+
+  @impl true
+  def handle_cast({:broadcast, attrs}, state) do
+    id = message_id(attrs)
+    packet = %{
+      "type" => "message",
+      "id" => id,
+      "from" => RescueMesh.NodeId.get(),
+      "content" => Map.get(attrs, "content", ""),
+      "priority" => Map.get(attrs, "priority", "normal"),
+      "ttl" => @max_ttl,
+      "ts" => System.system_time(:second)
+    }
+
+    persist(packet)
+    forward(packet)
+    {:noreply, %{state | seen: MapSet.put(state.seen, id)}}
+  end
+
+  @impl true
+  def handle_cast({:packet, ip, data}, state) do
+    case Jason.decode(data) do
+      {:ok, %{"type" => "message", "id" => id, "from" => from, "content" => content, "ttl" => ttl} = packet}
+          when is_binary(id) and is_binary(from) and is_binary(content) and is_integer(ttl) and ttl >= 0 ->
+        if MapSet.member?(state.seen, id) do
+          {:noreply, state}
+        else
+          persist(packet)
+          send_ack(ip, packet)
+          next = if ttl > 1, do: Map.put(packet, "ttl", ttl - 1), else: nil
+          if next, do: forward(next)
+          {:noreply, %{state | seen: MapSet.put(state.seen, id)}}
+        end
+
+      {:ok, %{"type" => "ack", "msg_id" => id, "from" => from}}
+          when is_binary(id) and is_binary(from) ->
+        RescueMesh.Messaging.Store.mark_delivered(id, from)
+        {:noreply, state}
+
+      _ ->
+        {:noreply, state}
     end
   end
 
-  @doc """
-  Envia mensagem para um nó específico.
-  """
-  def send_message_to(node_id, message) do
-    # Simula envio P2P
-    case RescueMesh.Messaging.Store.store(message, priority: :normal) do
-      {:ok, _} ->
-        # Marca como enviado para este nó
-        RescueMesh.State.put(:sent_to, Map.put(RescueMesh.State.get(:sent_to) || %{}, node_id, System.system_time(:second)))
-        :ok
-      error ->
-        error
-    end
+  defp persist(packet) do
+    RescueMesh.Messaging.Store.store(packet)
   end
 
-  @doc """
-  Propaga mensagem via gossip (um nó por vez).
-  """
-  def propagate(message, hops \\ 0) when hops < 5 do
-    neighbors = RescueMesh.Mesh.Node.get_neighbors()
-    # Filtra quem já recebeu esta mensagem
-    unreceived = Filter.filter(neighbors, fn node ->
-      not RescueMesh.Messaging.Store.received?(message, node)
-    end)
-
-    if length(unreceived) > 0 do
-      target = List.first(unreceived)
-      send_message_to(target, message)
-      # Marca como recebido por este nó
-      RescueMesh.Messaging.Store.mark_received(message, target)
-      # Continua propagação
-      propagate(message, hops + 1)
-    else
-      # Nenhum novo nó para propagar
-      :ok
-    end
+  defp forward(packet) do
+    encoded = Jason.encode!(packet)
+    RescueMesh.Mesh.Discovery.get_neighbors()
+    |> Enum.each(fn n -> RescueMesh.Mesh.UDP.send_mesh_packet(n.ip, n.port, encoded) end)
   end
 
-  @doc """
-  Verifica se mensagem foi recebida por um nó.
-  """
-  def received?(message, node_id) do
-    RescueMesh.Messaging.Store.has_received?(message, node_id)
+  defp send_ack(ip, packet) do
+    # ACK é devolvido ao endereço de origem observado no datagrama.
+    ack = Jason.encode!(%{"type" => "ack", "msg_id" => packet["id"], "from" => RescueMesh.NodeId.get()})
+    RescueMesh.Mesh.UDP.send_mesh_packet(ip, Application.get_env(:rescue_mesh, :mesh_udp_port), ack)
   end
 
-  @doc """
-  Reinicia protocolo gossip.
-  """
-  def restart do
-    # Zera estado interno se necessário
-    RescueMesh.State.put(:gossip_round, 0)
+  defp message_id(attrs) do
+    :crypto.hash(:sha256, [RescueMesh.NodeId.get(), System.system_time(:nanosecond), inspect(attrs)])
+    |> Base.encode16(case: :lower)
   end
 end

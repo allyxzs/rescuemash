@@ -1,73 +1,42 @@
 defmodule RescueMesh.Messaging.Store do
-  @moduledoc """
-  Armazenamento local de mensagens com persistência SQLite.
-  Gerencia filas de mensagens por prioridade e histórico de recebimento.
-  """
+  use GenServer
+  import Ecto.Query
+  alias RescueMesh.{Repo, Messaging.Message}
 
-  @doc """
-  Armazena uma mensagem no banco de dados local.
-  """
-  def store(content, \\ []) do
-    priority = Keyword.get(priority, :normal)
-    now = NaiveDateTime.utc_now()
+  def start_link(_), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
+  def store(packet), do: GenServer.call(__MODULE__, {:store, packet})
+  def mark_delivered(id, node), do: GenServer.cast(__MODULE__, {:delivered, id, node})
+  def pending_messages, do: GenServer.call(__MODULE__, :pending)
 
-    %RescueMesh.Messaging.Message{
-      content: content,
-      priority: priority,
-      status: "pending",
-      created_at: now,
-      delivered_at: nil,
-      received_by: []
+  @impl true
+  def init(_), do: {:ok, %{}}
+
+  @impl true
+  def handle_call({:store, packet}, _from, state) do
+    attrs = %{
+      id: packet["id"], from_node: packet["from"], content: packet["content"],
+      ttl: packet["ttl"], priority: Map.get(packet, "priority", "normal"),
+      created_at: DateTime.utc_now(), delivered_to: "[]"
     }
-    |> RescueMesh.Messaging.Message.changeset(%{content: content, priority: priority})
-    |> RescueMesh.Repo.insert()
+    result = %Message{} |> Message.changeset(attrs) |> Repo.insert(on_conflict: :nothing)
+    {:reply, result, state}
   end
 
-  @doc """
-  Obtém todas as mensagens pendentes.
-  """
-  def pending do
-    RescueMesh.Repo.all(
-      from m in RescueMesh.Messaging.Message,
-      where: m.status == "pending",
-      order_by: [asc: m.priority, asc: m.created_at]
-    )
+  @impl true
+  def handle_call(:pending, _from, state) do
+    query = from m in Message, where: m.status == "pending", order_by: [desc: m.priority, asc: m.created_at]
+    {:reply, Repo.all(query), state}
   end
 
-  @doc """
-  Atualiza status de mensagem como entregue.
-  """
-  def delivered(%RescueMesh.Messaging.Message{} = message) do
-    message
-    |> change_status("delivered")
-    |> RescueMesh.Repo.update()
-  end
-
-  @doc """
-  Marca mensagem como recebida por um nó específico.
-  """
-  def received_by(%RescueMesh.Messaging.Message{} = message, node_id) do
-    received_by = [node_id | (message.received_by || [])]
-    message
-    |> change_received_by(received_by)
-    |> RescueMesh.Repo.update()
-  end
-
-  @doc """
-  Obtém mensagens prioritárias.
-  """
-  def priority do
-    RescueMesh.Repo.all(
-      from m in RescueMesh.Messaging.Message,
-      where: m.priority == "high"
-    )
-  end
-
-  defp change_status(message, status) do
-    %{message | status: status}
-  end
-
-  defp change_received_by(message, received_by) do
-    %{message | received_by: received_by}
+  @impl true
+  def handle_cast({:delivered, id, node}, state) do
+    case Repo.get(Message, id) do
+      nil -> :ok
+      msg ->
+        delivered = Jason.decode!(msg.delivered_to || "[]") |> Enum.uniq([node])
+        attrs = %{delivered_to: Jason.encode!(delivered), status: "delivered"}
+        msg |> Message.changeset(attrs) |> Repo.update()
+    end
+    {:noreply, state}
   end
 end
