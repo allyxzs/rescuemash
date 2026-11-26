@@ -1,0 +1,18 @@
+# Linux only: host networking is required for reliable broadcast discovery on a LAN.
+services:
+  rescuemash:
+    build: .
+    network_mode: host
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - rescuemash_data:/data
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  rescuemash_data:

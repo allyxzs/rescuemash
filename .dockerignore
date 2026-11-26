@@ -2,7 +2,13 @@
 _build
 deps
 .elixir_ls
-priv/*.sqlite3
-priv/node_id
+data
 .env
-assets/node_modules
+.env.*
+.access-token
+**/*.sqlite3*
+priv/node_id
+test
+docs
+*.zip
+*.log

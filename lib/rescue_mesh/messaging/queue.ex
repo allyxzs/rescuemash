@@ -1,25 +1,20 @@
 defmodule RescueMesh.Messaging.Queue do
-  @moduledoc """
-  Fila de mensagens por prioridade com retry automático.
-  """
   use GenServer
-
-  def start_link(_) do
-    GenServer.start_link(__MODULE__, [], name: __MODULE__)
-  end
-
+  def start_link(_), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
   @impl true
   def init(_) do
-    {:ok, %{retries: %{}}}
-  end
-
-  def enqueue(msg) do
-    GenServer.cast(__MODULE__, {:enqueue, msg})
+    if Application.get_env(:rescue_mesh, :queue_enabled), do: schedule()
+    {:ok, %{}}
   end
 
   @impl true
-  def handle_cast({:enqueue, msg}, state) do
-    # Lógica de fila por prioridade
+  def handle_info(:tick, state) do
+    RescueMesh.Mesh.Gossip.retry_pending()
+    schedule()
     {:noreply, state}
   end
+
+  defp schedule,
+    do:
+      Process.send_after(self(), :tick, Application.fetch_env!(:rescue_mesh, :queue_interval_ms))
 end

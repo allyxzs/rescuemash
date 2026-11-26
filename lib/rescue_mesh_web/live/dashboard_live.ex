@@ -1,118 +1,245 @@
 defmodule RescueMeshWeb.DashboardLive do
   use Phoenix.LiveView
-  require Logger
-
+  alias RescueMesh.{Mesh.Discovery, Mesh.Gossip, Messaging.Store}
+  @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      :timer.send_interval(2_000, :refresh)
+      Phoenix.PubSub.subscribe(RescueMesh.PubSub, "mesh:updates")
+      :timer.send_interval(5_000, :refresh)
     end
 
-    {:ok, assign(socket, nodes: [], messages: [], pending: [])}
+    {:ok, socket |> assign(node_id: RescueMesh.NodeId.get(), filter: "all") |> refresh()}
   end
 
-  def handle_info(:refresh, socket) do
-    nodes = RescueMesh.Mesh.Discovery.get_neighbors()
-    pending = RescueMesh.Messaging.Store.pending_messages()
+  @impl true
+  def handle_info(:refresh, socket), do: {:noreply, refresh(socket)}
+  @impl true
+  def handle_event("send_message", params, socket) do
+    if allowed?() do
+      case Gossip.broadcast(Map.take(params, ["content", "priority"])) do
+        {:ok, _} ->
+          {:noreply,
+           socket
+           |> put_flash(:info, "Mensagem salva na fila. A confirmação depende de um nó vizinho.")
+           |> push_event("message-saved", %{})
+           |> refresh()}
 
-    {:noreply, assign(socket, nodes: nodes, pending: pending)}
+        {:error, _} ->
+          {:noreply,
+           put_flash(socket, :error, "Use de 1 a 2.000 caracteres e uma prioridade válida.")}
+      end
+    else
+      {:noreply, put_flash(socket, :error, "Muitas solicitações. Aguarde um minuto.")}
+    end
   end
 
+  def handle_event("filter", %{"status" => status}, socket)
+      when status in ["all", "pending", "delivered", "received", "failed"],
+      do: {:noreply, assign(socket, filter: status)}
+
+  def handle_event("retry", %{"id" => id}, socket) do
+    result = if allowed?(), do: Store.retry(id), else: {:error, :rate_limited}
+
+    case result do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Mensagem recolocada na fila.") |> refresh()}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Não foi possível repetir o envio agora.")}
+    end
+  end
+
+  defp allowed?, do: RescueMesh.RateLimiter.allow?(:dashboard_send, 120)
+
+  defp refresh(socket),
+    do:
+      assign(socket,
+        nodes: Discovery.public_neighbors(),
+        messages: Store.recent(),
+        counts: Store.counts()
+      )
+
+  defp visible(messages, "all"), do: messages
+  defp visible(messages, status), do: Enum.filter(messages, &(&1.status == status))
+  defp label("pending"), do: "Na fila"
+  defp label("delivered"), do: "Confirmada"
+  defp label("received"), do: "Recebida"
+  defp label("failed"), do: "Sem confirmação"
+  defp priority("normal"), do: "Normal"
+  defp priority("high"), do: "Alta"
+  defp priority("critical"), do: "Crítica"
+  @impl true
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-zinc-950 text-zinc-100 p-8">
-      <div class="max-w-7xl mx-auto">
-        <div class="flex justify-between items-center mb-8">
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/dashboard"><span class="brand-mark">✳</span><span>RescueMash<small>LOCAL COMMUNICATION / V3</small></span></a>
+        <div class="side-label">WORKSPACE</div>
+        <a class="nav-item active" href="#overview"><span>◉</span>
+        Central de comunicação <span>↗</span></a>
+        <a class="nav-item" href="#messages"><span>▤</span> Mensagens</a>
+        <a class="nav-item" href="#neighbors"><span>⌘</span> Nós da rede</a>
+        <div class="side-bottom">
+          <span class="status-dot"></span>
+          Nó local ativo<p>Protocolo v3 · AES-256-GCM</p><code>{String.slice(@node_id, 0, 8)}</code>
+        </div>
+      </aside>
+      <main id="overview" class="workspace">
+        <header class="topbar">
+          <span>Workspace <span class="muted">/</span> <strong>Visão geral</strong></span><span class="version">V3.0.0</span><form
+            action="/logout"
+            method="post"
+          >
+            <input type="hidden" name="_csrf_token" value={Plug.CSRFProtection.get_csrf_token()} /><input
+              type="hidden"
+              name="_method"
+              value="delete"
+            /><button class="text-button">Sair ↗</button>
+          </form>
+        </header>
+        <div class="page-heading">
           <div>
-            <h1 class="text-4xl font-semibold tracking-tight">RescueMesh</h1>
-            <p class="text-zinc-400 mt-1">v2.0.0 — Comunicação Distribuída Experimental</p>
-          </div>
-          <div class="flex items-center gap-4">
-            <div class="px-4 py-2 bg-emerald-950 text-emerald-400 rounded-full text-sm flex items-center gap-2">
-              <div class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
-              <%= length(@nodes) %> nós conectados
-            </div>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div class="lg:col-span-2">
-            <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-8">
-              <h2 class="text-xl font-medium mb-6">Topologia da Rede</h2>
-              <%= if Enum.empty?(@nodes) do %>
-                <div class="text-center py-12 text-zinc-500">
-                  <p>Nenhum nó descoberto ainda.</p>
-                  <p class="text-sm mt-2">Aguardando broadcasts UDP...</p>
-                </div>
-              <% else %>
-                <div class="space-y-3">
-                  <%= for node <- @nodes do %>
-                    <div class="flex items-center justify-between p-4 bg-zinc-950 rounded-2xl border border-zinc-800">
-                      <div class="flex items-center gap-4">
-                        <div class="w-10 h-10 rounded-full bg-emerald-900 flex items-center justify-center">
-                          <span class="text-emerald-400 text-xs font-mono"><%= String.slice(node.node_id, 0, 4) %></span>
-                        </div>
-                        <div>
-                          <div class="font-mono text-sm"><%= node.node_id %></div>
-                          <div class="text-xs text-zinc-500"><%= node.ip %>:<%= node.port %></div>
-                        </div>
-                      </div>
-                      <div class="text-right text-xs text-zinc-400">
-                        <div>último contato</div>
-                        <div><%= node.last_seen %></div>
-                      </div>
-                    </div>
-                  <% end %>
-                </div>
-              <% end %>
-            </div>
-          </div>
-
-          <div>
-            <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-8">
-              <h2 class="text-xl font-medium mb-6">Mensagens Pendentes</h2>
-              <%= if Enum.empty?(@pending) do %>
-                <p class="text-sm text-zinc-500">Nenhuma mensagem pendente.</p>
-              <% else %>
-                <div class="space-y-2">
-                  <%= for msg <- @pending do %>
-                    <div class="p-3 bg-zinc-950 rounded-xl text-xs">
-                      <div class="font-mono text-emerald-400"><%= String.slice(msg.id, 0, 12) %></div>
-                      <div class="text-zinc-400 mt-1 truncate"><%= msg.content %></div>
-                    </div>
-                  <% end %>
-                </div>
-              <% end %>
-            </div>
+            <p class="eyebrow">CONECTAR. COMPARTILHAR. COORDENAR.</p><h1>
+              Comunicação que<br />mantém você perto<span class="accent">.</span>
+            </h1><p class="muted">Sua central de mensagens entre nós da rede local.</p>
+          </div><div class="network-pill">
+            <span class="status-dot"></span> {if @nodes == [],
+              do: "Aguardando vizinhos",
+              else: "Rede descoberta"}
           </div>
         </div>
-
-        <div class="mt-8">
-          <div class="bg-zinc-900 border border-zinc-800 rounded-3xl p-8">
-            <h2 class="text-xl font-medium mb-6">Enviar Mensagem</h2>
-            <form phx-submit="send_message" class="flex gap-3">
-              <input type="text" name="content" placeholder="Digite sua mensagem..." class="flex-1 px-4 py-3 bg-zinc-950 border border-zinc-800 rounded-2xl focus:outline-none focus:border-zinc-600" />
-              <select name="priority" class="px-4 py-3 bg-zinc-950 border border-zinc-800 rounded-2xl">
-                <option value="normal">Normal</option>
-                <option value="high">Alta</option>
-                <option value="critical">Crítica</option>
-              </select>
-              <button type="submit" class="px-8 py-3 bg-white text-black rounded-2xl font-medium hover:bg-zinc-200">Enviar</button>
-            </form>
+        <div class="notice warning">
+          Experimental · Use para desenvolvimento e testes. Não substitui serviços oficiais de emergência.
+        </div>
+        <p :if={Phoenix.Flash.get(@flash, :info)} role="status" class="notice success">
+          {Phoenix.Flash.get(@flash, :info)}
+        </p>
+        <p :if={Phoenix.Flash.get(@flash, :error)} role="alert" class="notice error">
+          {Phoenix.Flash.get(@flash, :error)}
+        </p>
+        <div class="connection-error" role="status">
+          Conexão com a central interrompida. Reconectando…
+        </div>
+        <section class="metrics" aria-label="Resumo da rede">
+          <article>
+            <span class="metric-label">Nós vizinhos <span>⌘</span></span><strong>{length(@nodes)
+            |> Integer.to_string()
+            |> String.pad_leading(2, "0")}</strong><small>Descobertos nesta rede</small>
+          </article>
+          <article>
+            <span class="metric-label">Na fila <span>↗</span></span><strong>{@counts["pending"]
+            |> Integer.to_string()
+            |> String.pad_leading(2, "0")}</strong><small>Aguardando confirmação</small>
+          </article>
+          <article>
+            <span class="metric-label">Confirmadas <span>✓</span></span><strong class="accent">{@counts[
+              "delivered"
+            ]
+            |> Integer.to_string()
+            |> String.pad_leading(2, "0")}</strong><small>Ao menos um vizinho recebeu</small>
+          </article>
+          <article>
+            <span class="metric-label">Recebidas <span>↓</span></span><strong>{@counts["received"]
+            |> Integer.to_string()
+            |> String.pad_leading(2, "0")}</strong><small>Salvas neste dispositivo</small>
+          </article>
+        </section>
+        <div class="content-grid">
+          <section id="messages" class="panel messages-panel">
+            <div class="panel-heading">
+              <h2>Atividade de mensagens</h2><span class="live-label"><span class="status-dot"></span>
+              AO VIVO</span>
+            </div>
+            <div class="filters" aria-label="Filtrar mensagens">
+              <button
+                :for={
+                  {value, text} <- [
+                    {"all", "Todas"},
+                    {"pending", "Na fila"},
+                    {"received", "Recebidas"},
+                    {"failed", "Sem confirmação"}
+                  ]
+                }
+                phx-click="filter"
+                phx-value-status={value}
+                class={if @filter == value, do: "selected", else: ""}
+                aria-pressed={to_string(@filter == value)}
+              >{text}</button>
+            </div>
+            <div :if={visible(@messages, @filter) == []} class="empty-state">
+              <span class="empty-icon">↗</span><h3>Nenhuma mensagem por aqui</h3><p>
+                Envie sua primeira mensagem.<br />Ela fica salva mesmo sem vizinhos disponíveis.
+              </p>
+            </div>
+            <div class="message-list">
+              <article
+                :for={msg <- visible(@messages, @filter)}
+                class="message"
+                id={"message-#{msg.id}"}
+              >
+                <div class="message-meta">
+                  <span class={"priority #{msg.priority}"}>{priority(msg.priority)}</span><span>{Calendar.strftime(
+                    msg.created_at,
+                    "%d/%m · %H:%M UTC"
+                  )}</span><span class={"badge #{msg.status}"}>{label(msg.status)}</span>
+                </div>
+                <p>{msg.content}</p><div class="message-foot">
+                  <code>{String.slice(msg.from_node, 0, 8)} · {String.slice(msg.id, 0, 8)}</code><span>{msg.attempts} tentativa(s)</span><button
+                    :if={msg.status == "failed"}
+                    class="text-button"
+                    phx-click="retry"
+                    phx-value-id={msg.id}
+                  >Tentar novamente ↗</button>
+                </div>
+              </article>
+            </div>
+            <footer class="panel-footer">
+              Últimas 50 mensagens · histórico persistido localmente
+            </footer>
+          </section>
+          <div class="right-column">
+            <section class="panel composer">
+              <div class="panel-heading">
+                <h2>Nova mensagem</h2><span>↗</span>
+              </div><form id="message-composer" phx-submit="send_message" phx-hook="MessageComposer">
+                <label for="content">O que precisa comunicar?</label><textarea
+                  id="content"
+                  name="content"
+                  rows="4"
+                  maxlength="2000"
+                  required
+                  placeholder="Escreva uma atualização para sua rede…"
+                ></textarea><div class="field-hint">Até 2.000 caracteres</div><label for="priority">Prioridade</label><select
+                  name="priority"
+                  id="priority"
+                ><option value="normal">Normal — atualização de rotina</option><option value="high">
+                  Alta — atenção necessária
+                </option><option value="critical">Crítica — ação urgente</option></select><button
+                  type="submit"
+                  phx-disable-with="Salvando…"
+                >Adicionar à fila <span>↗</span></button>
+              </form><p class="fine">
+                O envio começa quando um vizinho é descoberto. Confirmação significa recebimento em um nó, não leitura por uma pessoa.
+              </p>
+            </section>
+            <section id="neighbors" class="panel neighbors">
+              <div class="panel-heading">
+                <h2>Nós da rede</h2><span class="count">{length(@nodes)}</span>
+              </div><div :if={@nodes == []} class="neighbors-empty">
+                <span>⌘</span><p>Buscando conexões próximas</p><small>Use a mesma chave de rede nos dispositivos da LAN.</small>
+              </div><div :for={node <- @nodes} class="neighbor">
+                <span class="status-dot"></span><div>
+                  <code>{String.slice(node.node_id, 0, 8)}</code><small>{node.ip}:{node.port}</small>
+                </div><span class="badge received">Ativo</span>
+              </div>
+            </section>
           </div>
         </div>
-      </div>
+        <footer class="page-footer">
+          <span>RescueMash v3 <span class="muted">/ Comunicação local distribuída</span></span><span>Elixir · Phoenix · SQLite</span>
+        </footer>
+      </main>
     </div>
     """
-  end
-
-  def handle_event("send_message", %{"content" => content, "priority" => priority}, socket) do
-    packet = %{
-      "content" => content,
-      "priority" => priority,
-      "from" => RescueMesh.NodeId.get()
-    }
-
-    RescueMesh.Mesh.Gossip.broadcast(packet)
-    {:noreply, put_flash(socket, :info, "Mensagem enviada")}
   end
 end

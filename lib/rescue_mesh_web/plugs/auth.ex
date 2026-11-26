@@ -1,26 +1,21 @@
 defmodule RescueMeshWeb.Plugs.Auth do
   import Plug.Conn
-  require Logger
-
   def init(opts), do: opts
 
-  def call(conn, _opts) do
-    case get_req_header(conn, "authorization") do
-      ["Bearer " <> token] ->
-        expected = Application.get_env(:rescue_mesh, :security)[:api_token_hash]
+  def call(conn, _) do
+    authorized =
+      case get_req_header(conn, "authorization") do
+        ["Bearer " <> token] -> RescueMesh.Security.authenticate(token)
+        _ -> false
+      end
 
-        if expected && Plug.Crypto.SecureCompare.secure_compare(token, expected) do
-          conn
-        else
-          conn
-          |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
-          |> halt()
-        end
-
-      _ ->
-        conn
-        |> send_resp(401, Jason.encode!(%{error: "missing authorization"}))
-        |> halt()
+    if authorized do
+      conn
+    else
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(401, Jason.encode!(%{error: "unauthorized"}))
+      |> halt()
     end
   end
 end

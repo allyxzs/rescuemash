@@ -1,51 +1,33 @@
 defmodule RescueMesh.NodeId do
-  @moduledoc """
-  Gera e persiste um identificador único e estável para este nó.
-  O ID é armazenado em disco para que sobreviva a reinicializações.
-  """
   use GenServer
-
-  @node_id_file Application.compile_env!(:rescue_mesh, :node_id_path)
-
-  def start_link(_) do
-    GenServer.start_link(__MODULE__, [], name: __MODULE__)
-  end
-
-  def get do
-    GenServer.call(__MODULE__, :get)
-  end
-
+  def start_link(_), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
+  def get, do: GenServer.call(__MODULE__, :get)
   @impl true
   def init(_) do
-    node_id = load_or_generate()
-    {:ok, %{node_id: node_id}}
+    path = Application.fetch_env!(:rescue_mesh, :node_id_path)
+
+    id =
+      case File.read(path) do
+        {:ok, value} ->
+          case Ecto.UUID.cast(String.trim(value)) do
+            {:ok, uuid} -> uuid
+            :error -> raise "Invalid node ID; restore a valid backup: #{path}"
+          end
+
+        {:error, :enoent} ->
+          uuid = Ecto.UUID.generate()
+          File.mkdir_p!(Path.dirname(path))
+          File.write!(path <> ".tmp", uuid)
+          File.rename!(path <> ".tmp", path)
+          uuid
+
+        {:error, reason} ->
+          raise "Cannot read node ID: #{inspect(reason)}"
+      end
+
+    {:ok, id}
   end
 
   @impl true
-  def handle_call(:get, _from, state) do
-    {:reply, state.node_id, state}
-  end
-
-  defp load_or_generate do
-    case File.read(@node_id_file) do
-      {:ok, id} when byte_size(id) == 36 ->
-        String.trim(id)
-
-      _ ->
-        id = generate_uuid()
-        File.mkdir_p!(Path.dirname(@node_id_file))
-        File.write!(@node_id_file, id)
-        id
-    end
-  end
-
-  defp generate_uuid do
-    :crypto.strong_rand_bytes(16)
-    |> :binary.bin_to_list()
-    |> Enum.map(&Integer.to_string(&1, 16))
-    |> Enum.map(&String.pad_leading(&1, 2, "0"))
-    |> Enum.join()
-    |> String.downcase()
-    |> String.replace(~r/(.{8})(.{4})(.{4})(.{4})(.{12})/, "\\1-\\2-\\3-\\4-\\5")
-  end
+  def handle_call(:get, _from, id), do: {:reply, id, id}
 end
